@@ -201,6 +201,65 @@ class Muon(torch.optim.Optimizer):
                 handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
                 params_world = params[base_i : base_i + self.world_size]
             update_prev()
+            
+            
+    # @torch.no_grad()
+    # def move_to_base(self):
+    #     for group in self.param_groups:
+    #         update_buffer: Tensor = group["update_buffer"]
+    #         update_buffer_views: list[Tensor] = group["update_buffer_views"]
+    #         # generate weight updates in distributed fashion
+    #         params: list[Tensor] = group["params"]
+    #         handle = None
+    #         params_world = None
+    #         def update_prev(): # optimized Muon implementation contributed by @YouJiacheng
+    #             handle.wait()
+    #             for p_world, g_world in zip(params_world, update_buffer_views):
+    #                 p_world.add_(g_world.view_as(p_world), alpha=group["lr"] * group["overshoot"])
+    #         for base_i in range(len(params))[::self.world_size]:
+    #             if base_i + self.rank < len(params):
+    #                 p = params[base_i + self.rank]
+    #                 state = self.state[p]
+    #                 if "momentum_buffer" not in state:
+    #                     state["momentum_buffer"] = torch.zeros_like(g)
+    #                 g = state["momentum_buffer"]
+    #             else:
+    #                 g = update_buffer_views[self.rank]
+    #             if base_i > 0:
+    #                 update_prev() # async all_gather instead of sync all_reduce by @YouJiacheng
+    #             handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
+    #             params_world = params[base_i : base_i + self.world_size]
+    #         update_prev()
+            
+    # @torch.no_grad()
+    # def move_to_overshoot(self):
+    #     for group in self.param_groups:
+    #         update_buffer: Tensor = group["update_buffer"]
+    #         update_buffer_views: list[Tensor] = group["update_buffer_views"]
+    #         # generate weight updates in distributed fashion
+    #         params: list[Tensor] = group["params"]
+    #         handle = None
+    #         params_world = None
+    #         def update_prev(): # optimized Muon implementation contributed by @YouJiacheng
+    #             handle.wait()
+    #             for p_world, g_world in zip(params_world, update_buffer_views):
+    #                 p_world.add_(g_world.view_as(p_world), alpha=-group["lr"] * group["overshoot"])
+    #         for base_i in range(len(params))[::self.world_size]:
+    #             if base_i + self.rank < len(params):
+    #                 p = params[base_i + self.rank]
+    #                 # g = p.grad
+    #                 # assert g is not None
+    #                 state = self.state[p]
+    #                 if "momentum_buffer" not in state:
+    #                     state["momentum_buffer"] = torch.zeros_like(g)
+    #                 g = state["momentum_buffer"]
+    #             else:
+    #                 g = update_buffer_views[self.rank]
+    #             if base_i > 0:
+    #                 update_prev() # async all_gather instead of sync all_reduce by @YouJiacheng
+    #             handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
+    #             params_world = params[base_i : base_i + self.world_size]
+    #         update_prev()
 
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the model
@@ -584,6 +643,8 @@ for step in range(train_steps + 1):
 
     # --------------- VALIDATION SECTION -----------------
     if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
+        if step > 0 and hasattr(optimizer2, "move_to_base"):
+            optimizer2.move_to_base()
         # stop the clock
         torch.cuda.synchronize()
         training_time_ms += 1000 * (time.perf_counter() - t0)
@@ -605,6 +666,8 @@ for step in range(train_steps + 1):
         # start the clock again
         torch.cuda.synchronize()
         t0 = time.perf_counter()
+        if step > 0 and hasattr(optimizer2, "move_to_overshoot"):
+            optimizer2.move_to_overshoot()
 
     if last_step:
         if master_process and args.save_checkpoint:
@@ -641,3 +704,24 @@ print0(
     console=True,
 )
 dist.destroy_process_group()
+
+# Baseline: 3.2781
+
+
+# --- No step back
+# Overshoot_0: 3.2861
+# Overshoot_0.5: 3.2802 
+# Overshoot_0.95: 3.2794 # Eqvivalent to Nesterov's momentum (used)
+# Overshoot_1.5: 3.2801
+# Overshoot_2: 3.2813
+# Overshoot_3: 3.2875
+
+
+# ---
+
+# --- With step back
+# Overshoot_0.80: 3.2779
+# Overshoot_0.95: 3.2774, 3.2778
+# Overshoot_3: 3.2884
+# Overshoot_5: 3.3055
+# Overshoot_7: 3.3328
